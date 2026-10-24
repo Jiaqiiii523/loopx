@@ -749,6 +749,9 @@ validation declaration. Open, deferred, blocked, foreign and unvalidated tasks
 are rejected; configuring a calendar does not resume them or install commands.
 Report-generation and calendar-generated Tasks are already window-bound and
 cannot be sources themselves. Use the existing report calendar for reports.
+This uses the Goal's existing single calendar subscription. Selecting this
+mode replaces that Goal's previous subscription after the pending-window
+guard; it does not add another schedule beside an enabled report calendar.
 The original validator must check the repeated task's current expected
 outcome; a check pinned to an old output does not establish fresh business
 work. Scheduling preserves that declaration rather than improving its proof.

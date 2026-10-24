@@ -251,12 +251,14 @@ class SessionCalendarTasks(ManagedSessionReports):
             operation_id="task." + window["window_id"], todo_id=todo["todo_id"], scheduled_window=window)
 
     def health(self, session_id):
+        configured = False
         try:
             actor = self.selected(session_id)["actor"]
             goal = load_goal_from_registry(self.controller.registry_path, actor["goal_id"])
             config = configuration_summary(goal)
             if not config or config.get("profile_preset") != "session-task" or config.get("route_ref") != "managed-session:" + session_id:
                 return {"available": True, "configured": False, "enabled": False}
+            configured = True
             journal = read_cadence_journal(runtime_root=self.root, goal_id=actor["goal_id"])
             receipt = self._completion(journal["window"]) if journal else None
             client = ("managed." + receipt["turn_instance_id"].removeprefix("managed-session.")
@@ -272,4 +274,4 @@ class SessionCalendarTasks(ManagedSessionReports):
                 "turn_id": (turn or {}).get("turn_id"), "native_result_status": native.get("status"),
                 "result_kind": native.get("result_kind")}
         except (OSError, ValueError, KeyError, TypeError):
-            return {"available": False, "error_code": "managed_calendar_task_unavailable"}
+            return {"available": False, "configured": configured, "error_code": "managed_calendar_task_unavailable"}

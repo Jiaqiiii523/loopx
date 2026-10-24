@@ -307,7 +307,9 @@ class ManagedSessionTurn:
             from .steward_reports import ManagedSessionReports
             from .session_calendar_tasks import SessionCalendarTasks
             result["report"] = ManagedSessionReports(self.controller).health(session_id)
-            result["scheduled_task"] = SessionCalendarTasks(self.controller).health(session_id)
+            task = SessionCalendarTasks(self.controller).health(session_id)
+            if task.get("configured"):
+                result["scheduled_task"] = task
         return result
 
     def submit(self, session_id: str, *, agent_id: str, operation_id: str,

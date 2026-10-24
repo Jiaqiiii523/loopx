@@ -134,6 +134,7 @@ def fixed_clock(monkeypatch):
 @pytest.mark.parametrize("provider", ["file", "sqlite"])
 def test_calendar_executes_ordinary_task_and_returns_original_result(steward, tmp_path, monkeypatch, provider):
     import loopx.capabilities.native_chat.session_calendar_tasks as module
+    from loopx.capabilities.native_chat.steward_managed_mode import ManagedSessionTurn
     from loopx.capabilities.native_chat.steward_monitor import StewardMonitor
     session, actor, unrelated, capture, workspace, config = setup_task(steward, tmp_path, monkeypatch, provider)
     store, runtime, bot, *_ = steward
@@ -152,8 +153,10 @@ def test_calendar_executes_ordinary_task_and_returns_original_result(steward, tm
             pytest.fail(f"The real calendar producer rejected its fixture: {exc}")
     monkeypatch.setattr(module.SessionCalendarTasks, "frontier", checked_frontier)
     history, calls, writes = store.messages(sid), capture.read_bytes(), list(bot.writes)
+    assert "scheduled_task" not in ManagedSessionTurn(runtime).inspect(sid)
     with settings_server(steward) as request:
         apply_configuration(request, actor["goal_id"], config)
+        assert ManagedSessionTurn(runtime).inspect(sid)["scheduled_task"]["configured"]
         assert capture.read_bytes() == calls
         assert not pump_steward_monitors(runtime)
         assert read_cadence_journal(runtime_root=runtime.coordination_runtime_root, goal_id=actor["goal_id"]) is None
