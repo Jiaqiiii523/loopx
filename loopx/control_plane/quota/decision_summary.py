@@ -76,6 +76,32 @@ def quota_decision_agent_id(decision: dict[str, Any]) -> str | None:
     return normalize_todo_claimed_by(agent_identity.get("agent_id"))
 
 
+# Findings that say this Goal's own declared active state can no longer be
+# read. ``state_file_not_declared`` marks an entry that never declared one, and
+# the two source-registry kinds are collapsed into shadow items by
+# ``registry_health_projection.SOURCE_REGISTRY_SHADOW_FINDINGS``, so none of
+# them proves a declared state was lost and they stay out of this gate.
+STATE_FILE_LOST_FINDINGS = frozenset({"state_file_missing"})
+
+
+def goal_state_file_is_readable(status_payload: dict[str, Any], *, goal_id: str) -> bool:
+    """Report whether the global registry still sees this Goal's state file."""
+
+    global_registry = status_payload.get("global_registry")
+    findings = (
+        global_registry.get("findings") if isinstance(global_registry, dict) else None
+    )
+    if not isinstance(findings, list):
+        return True
+    selected = str(goal_id or "").strip()
+    return not any(
+        isinstance(finding, dict)
+        and finding.get("kind") in STATE_FILE_LOST_FINDINGS
+        and str(finding.get("goal_id") or "").strip() == selected
+        for finding in findings
+    )
+
+
 def goal_status_health_ok(
     status_payload: dict[str, Any],
     *,
@@ -84,6 +110,11 @@ def goal_status_health_ok(
 ) -> bool:
     """Keep global guards fail-closed without importing unrelated goal errors."""
 
+    global_registry = status_payload.get("global_registry")
+    if isinstance(global_registry, dict) and global_registry.get("ok") is False:
+        return False
+    if not goal_state_file_is_readable(status_payload, goal_id=goal_id):
+        return False
     contract = (
         status_payload.get("contract")
         if isinstance(status_payload.get("contract"), dict)
@@ -91,9 +122,6 @@ def goal_status_health_ok(
     )
     if "error_diagnostics" not in contract:
         return fallback
-    global_registry = status_payload.get("global_registry")
-    if isinstance(global_registry, dict) and global_registry.get("ok") is False:
-        return False
     scoped = project_contract_health_for_goal(contract, goal_id=goal_id)
     return scoped.get("ok") is True
 
