@@ -675,7 +675,12 @@ Current finding kinds:
 - `stale_source_registry`: the source registry changed after the last recorded
   `synced_at`, so the global entry may be stale.
 - `state_file_missing`: the goal's declared active state file no longer exists.
+  Unlike the collapsed provenance kinds below, this one is a quota health
+  blocker for its own `goal_id`: `quota should-run` fails closed instead of
+  authorizing a turn against a Goal with no readable active state.
 - `state_file_not_declared`: the global entry has no durable active state file.
+  This marks an entry that never declared one rather than a declared state that
+  was lost, so it stays a registry-completeness note and does not block compute.
 - `current_registry_scope_excludes_global_goals`: informational reminder that a
   project-local registry view excludes goals that are present in the shared
   global registry.
