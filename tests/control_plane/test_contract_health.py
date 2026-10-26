@@ -13,6 +13,7 @@ from loopx.control_plane.goals.contract_health import (
 )
 from loopx.control_plane.quota.decision_summary import goal_status_health_ok
 from loopx.quota import build_quota_should_run
+from loopx.status import collect_status
 
 
 GOAL_A = "goal-a"
@@ -261,7 +262,22 @@ def test_known_multi_goal_error_blocks_only_affected_goals() -> None:
     )
 
 
-def test_quota_uses_selected_goal_health_in_an_all_goal_status() -> None:
+def _global_registry_finding(goal_id: str, *, kind: str, severity: str = "action") -> dict:
+    return {
+        "kind": kind,
+        "severity": severity,
+        "goal_id": goal_id,
+        "message": f"`{goal_id}` {kind.replace('_', ' ')}",
+        "recommended_action": f"repair `{goal_id}` state_file or reconnect the project",
+    }
+
+
+def _goal_a_status(*, registry_findings: list[dict] | None = None) -> dict:
+    """One all-goal status whose only variable is its global registry findings.
+
+    The Goal, contract and attention fixtures stay identical across the cases
+    below, so a difference in the decision can only come from the finding.
+    """
     views = contract_error_views(
         [
             contract_error_diagnostic(
@@ -296,14 +312,17 @@ def test_quota_uses_selected_goal_health_in_an_all_goal_status() -> None:
             }
         ],
     }
-    status = {
+    return {
         "ok": False,
         "contract": {
             **views,
             "ok": False,
             "summary": {"errors": 1, "warnings": 0, "checks": 1},
         },
-        "global_registry": {"ok": True},
+        "global_registry": {
+            "ok": True,
+            "findings": list(registry_findings or []),
+        },
         "attention_queue": {
             "items": [
                 {
@@ -333,8 +352,193 @@ def test_quota_uses_selected_goal_health_in_an_all_goal_status() -> None:
         },
     }
 
-    decision = build_quota_should_run(status, goal_id=GOAL_A)
+
+def test_quota_uses_selected_goal_health_in_an_all_goal_status() -> None:
+    decision = build_quota_should_run(_goal_a_status(), goal_id=GOAL_A)
 
     assert decision["status_health_ok"] is True
     assert decision["normal_delivery_allowed"] is True
     assert decision["should_run"] is True
+
+
+def test_missing_state_file_finding_fails_the_goal_closed() -> None:
+    """`state_file_missing` names the Goal whose durable state cannot be read."""
+
+    status = {
+        "contract": {
+            "ok": True,
+            "summary": {"errors": 0, "warnings": 0, "checks": 1},
+        },
+        "global_registry": {
+            "ok": True,
+            "findings": [_global_registry_finding(GOAL_A, kind="state_file_missing")],
+        },
+    }
+
+    assert goal_status_health_ok(status, goal_id=GOAL_A, fallback=True) is False
+    assert (
+        goal_status_health_ok(status, goal_id=GOAL_A_LONG, fallback=True) is True
+    )
+
+
+def test_missing_state_file_finding_fails_closed_beside_an_unrelated_goal_error() -> None:
+    """The finding blocks its own Goal, not the Goals beside it.
+
+    ``goal-c`` has neither a registry finding nor a contract diagnostic, while
+    ``goal-a-long`` keeps the pre-existing goal-scoped error, so only ``goal-a``
+    may lose compute here.
+    """
+
+    status = _goal_a_status(
+        registry_findings=[
+            _global_registry_finding(GOAL_A, kind="state_file_missing")
+        ]
+    )
+
+    assert goal_status_health_ok(status, goal_id=GOAL_A, fallback=True) is False
+    assert goal_status_health_ok(status, goal_id="goal-c", fallback=True) is True
+
+
+def test_quota_should_run_blocks_a_goal_whose_state_file_is_missing() -> None:
+    decision = build_quota_should_run(
+        _goal_a_status(
+            registry_findings=[
+                _global_registry_finding(GOAL_A, kind="state_file_missing")
+            ]
+        ),
+        goal_id=GOAL_A,
+    )
+
+    assert decision["status_health_ok"] is False
+    assert decision["should_run"] is False
+    assert decision["normal_delivery_allowed"] is False
+
+    control = build_quota_should_run(
+        _goal_a_status(
+            registry_findings=[
+                _global_registry_finding(GOAL_A_LONG, kind="state_file_missing")
+            ]
+        ),
+        goal_id=GOAL_A,
+    )
+    assert control["status_health_ok"] is True
+    assert control["should_run"] is True
+
+
+def test_high_global_finding_fails_closed_without_a_contract_diagnostic() -> None:
+    status = {
+        "contract": {
+            "ok": True,
+            "summary": {"errors": 0, "warnings": 0, "checks": 1},
+        },
+        "global_registry": {
+            "ok": False,
+            "findings": [
+                _global_registry_finding(
+                    GOAL_A, kind="global_registry_unreadable", severity="high"
+                )
+            ],
+        },
+    }
+
+    assert goal_status_health_ok(status, goal_id=GOAL_A, fallback=True) is False
+
+
+def test_registry_completeness_and_shadow_findings_do_not_block_a_goal() -> None:
+    """Only a lost state file fails the gate closed; neighbours stay projected.
+
+    `state_file_not_declared` marks an entry that never declared one, and the
+    two source-registry kinds are collapsed into shadow items by
+    `SOURCE_REGISTRY_SHADOW_FINDINGS`, so none of them may block compute here.
+    """
+
+    for kind in (
+        "state_file_not_declared",
+        "source_registry_missing",
+        "stale_source_registry",
+        "duplicate_goal_id",
+    ):
+        status = {
+            "contract": {
+                "ok": True,
+                "summary": {"errors": 0, "warnings": 0, "checks": 1},
+            },
+            "global_registry": {
+                "ok": True,
+                "findings": [_global_registry_finding(GOAL_A, kind=kind)],
+            },
+        }
+        assert (
+            goal_status_health_ok(status, goal_id=GOAL_A, fallback=True) is True
+        ), f"{kind} must stay out of the quota health gate"
+
+
+def test_the_gate_reads_a_finding_the_real_status_projection_emits(
+    tmp_path: Path,
+) -> None:
+    """The kind and the Goal id come from `collect_status`, not from a literal.
+
+    One global entry declares a state file that no longer exists while the
+    project registry keeps its readable state, so the projection has every
+    reason to emit the finding and no contract error to hide behind.
+    """
+
+    registry_path, runtime_root, public_file = _registry(tmp_path)
+    global_members = json.loads(registry_path.read_text(encoding="utf-8"))
+    missing = tmp_path / "GONE_STATE.md"
+    for goal in global_members["goals"]:
+        if goal["id"] == GOAL_A:
+            goal["state_file"] = str(missing)
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    (runtime_root / "registry.global.json").write_text(
+        json.dumps(global_members), encoding="utf-8"
+    )
+
+    payload = collect_status(
+        registry_path=registry_path,
+        runtime_root_override=str(runtime_root),
+        scan_roots=[public_file],
+        limit=5,
+        include_public_boundary_scan=False,
+    )
+    registry_findings = payload["global_registry"].get("findings") or []
+    emitted = [
+        finding
+        for finding in registry_findings
+        if finding.get("kind") == "state_file_missing"
+        and finding.get("goal_id") == GOAL_A
+    ]
+    assert emitted, [
+        (finding.get("kind"), finding.get("goal_id")) for finding in registry_findings
+    ]
+
+    status = {
+        "contract": {
+            "ok": True,
+            "summary": {"errors": 0, "warnings": 0, "checks": 1},
+        },
+        "global_registry": {
+            "ok": payload["global_registry"].get("ok", True),
+            "findings": emitted,
+        },
+    }
+    assert goal_status_health_ok(status, goal_id=GOAL_A, fallback=True) is False
+    assert goal_status_health_ok(status, goal_id=GOAL_A_LONG, fallback=True) is True
+
+
+def test_a_status_without_a_global_registry_block_stays_on_its_plan_fallback() -> None:
+    """Absence of the panel is not evidence of a lost state file.
+
+    A status payload may carry no `global_registry` block at all; the guard then
+    keeps its existing plan fallback instead of blocking or failing to read.
+    """
+
+    status = {
+        "contract": {
+            "ok": True,
+            "summary": {"errors": 0, "warnings": 0, "checks": 1},
+        }
+    }
+
+    assert goal_status_health_ok(status, goal_id=GOAL_A, fallback=True) is True
+    assert goal_status_health_ok(status, goal_id=GOAL_A, fallback=False) is False
